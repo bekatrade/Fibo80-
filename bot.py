@@ -3,17 +3,18 @@ import time
 import threading
 import requests
 from flask import Flask
+from datetime import datetime
 
 # ==================== SOZLAMALAR ====================
 BOT_TOKEN = "8599420009:AAG3mwpv8COm1BL0RjguYPScBHjLY-hMYKA"
 CHAT_ID = "8426582765"
-API_KEY = "981d9430d057487ba2f3bfac82610df7"
-SYMBOL = "XAU/USD"
+API_KEY = "dah628pr01qomffmt32gdah628pr01qomffmt330"
+SYMBOL = "OANDA:XAU_USD"
 
 TIMEFRAMES = {
-    "M5": "5min",
-    "M15": "15min",
-    "M30": "30min"
+    "M5": "5",
+    "M15": "15",
+    "M30": "30"
 }
 
 last_processed = {
@@ -22,16 +23,15 @@ last_processed = {
     "M30": None
 }
 
-# ==================== FLASK SERVER (Web Service uchun) ====================
+# ==================== FLASK SERVER (Render uchun) ====================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "XAU/USD Signal Bot muvaffaqiyatli ishlab turibdi!", 200
+    return "XAU/USD Finnhub Signal Bot ishlamoqda!", 200
 
-# ==================== BOT FUNKSIYALARI ====================
+# ==================== TELEGRAM VA BOZOR FUNKSIYALARI ====================
 def send_telegram(text):
-    """Telegram botga xabar yuborish"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -44,73 +44,73 @@ def send_telegram(text):
         print(f"[Xatolik] Telegramga yuborib bo'lmadi: {e}")
 
 def get_current_price():
-    """Joriy oltin narxini olish"""
-    url = f"https://api.twelvedata.com/price?symbol={SYMBOL}&apikey={API_KEY}"
+    url = f"https://finnhub.io/api/v1/quote?symbol={SYMBOL}&token={API_KEY}"
     try:
         res = requests.get(url, timeout=10).json()
-        if "price" in res:
-            return float(res["price"])
+        if "c" in res and res["c"] != 0:
+            return float(res["c"])
     except Exception as e:
-        print(f"[Xatolik] Narxni olib bo'lmadi: {e}")
+        print(f"[Xatolik] Narx olinmadi: {e}")
     return None
 
-def check_timeframe(tf_name, tf_interval):
-    """Berilgan timeframe bo'yicha shamlarni tekshirish"""
-    url = f"https://api.twelvedata.com/time_series?symbol={SYMBOL}&interval={tf_interval}&outputsize=4&apikey={API_KEY}"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
+def check_timeframe(tf_name, tf_resolution):
+    now_ts = int(time.time())
+    from_ts = now_ts - (86400 * 2)
 
-        if "values" not in data or len(data["values"]) < 3:
+    url = f"https://finnhub.io/api/v1/forex/candle?symbol={SYMBOL}&resolution={tf_resolution}&from={from_ts}&to={now_ts}&token={API_KEY}"
+    try:
+        res = requests.get(url, timeout=10).json()
+        if res.get("s") != "ok" or len(res.get("t", [])) < 3:
             return
 
-        c_bar = data["values"][1]  # yangi yopilgan 2-sham
-        p_bar = data["values"][2]  # 1-sham (oldingi sham)
-
-        c_time = c_bar["datetime"]
-
+        # -1: Hozir ochiq turgan sham
+        # -2: Yangi yopilgan 2-sham
+        # -3: Undan oldingi 1-sham
+        c_time = res["t"][-2]
         if last_processed[tf_name] == c_time:
             return
 
-        h1, l1 = float(p_bar["high"]), float(p_bar["low"])
-        h2, l2 = float(c_bar["high"]), float(c_bar["low"])
-        c2 = float(c_bar["close"])
+        h1, l1 = float(res["h"][-3]), float(res["l"][-3])
+        h2, l2 = float(res["h"][-2]), float(res["l"][-2])
+        c2 = float(res["c"][-2])
 
         # Shart 1: 2-sham 1-shamning yuqorisini ham, pastini ham yangilagan (Sweep)
         swept_both = (h2 > h1) and (l2 < l1)
 
         if swept_both:
-            # Shart 2: Pastga tana bilan buzib yopilsa (SELL)
+            time_str = datetime.fromtimestamp(c_time).strftime('%H:%M')
+
+            # Shart 2: Pastga tana bilan yopilsa (SELL)
             if c2 < l1:
                 msg = (
-                    f"🔴 <b>SELL SIGNAL | {SYMBOL}</b>\n"
+                    f"🔴 <b>SELL SIGNAL | XAU/USD</b>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"⏱ <b>Timeframe:</b> {tf_name}\n"
-                    f"🕒 <b>Sham vaqti:</b> {c_time}\n"
+                    f"🕒 <b>Sham yopilgan vaqt:</b> {time_str}\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"📌 <b>1-sham:</b> High: <code>{h1:.2f}</code> | Low: <code>{l1:.2f}</code>\n"
                     f"📌 <b>2-sham:</b> High: <code>{h2:.2f}</code> | Low: <code>{l2:.2f}</code>\n"
                     f"🎯 <b>Close:</b> <code>{c2:.2f}</code>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⚡️ <i>Ikkala tomondan likvidlik olinib, pastga tana bilan yopildi!</i>"
+                    f"⚡️ <i>Ikkala tomondan likvidlik olindi va pastga tana bilan yopildi!</i>"
                 )
                 send_telegram(msg)
                 last_processed[tf_name] = c_time
                 print(f"[{tf_name}] SELL signali jo'natildi!")
 
-            # Shart 3: Tepaga tana bilan buzib yopilsa (BUY)
+            # Shart 3: Tepaga tana bilan yopilsa (BUY)
             elif c2 > h1:
                 msg = (
-                    f"🟢 <b>BUY SIGNAL | {SYMBOL}</b>\n"
+                    f"🟢 <b>BUY SIGNAL | XAU/USD</b>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"⏱ <b>Timeframe:</b> {tf_name}\n"
-                    f"🕒 <b>Sham vaqti:</b> {c_time}\n"
+                    f"🕒 <b>Sham yopilgan vaqt:</b> {time_str}\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"📌 <b>1-sham:</b> High: <code>{h1:.2f}</code> | Low: <code>{l1:.2f}</code>\n"
                     f"📌 <b>2-sham:</b> High: <code>{h2:.2f}</code> | Low: <code>{l2:.2f}</code>\n"
                     f"🎯 <b>Close:</b> <code>{c2:.2f}</code>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⚡️ <i>Ikkala tomondan likvidlik olinib, tepaga tana bilan yopildi!</i>"
+                    f"⚡️ <i>Ikkala tomondan likvidlik olindi va tepaga tana bilan yopildi!</i>"
                 )
                 send_telegram(msg)
                 last_processed[tf_name] = c_time
@@ -120,29 +120,28 @@ def check_timeframe(tf_name, tf_interval):
         print(f"[{tf_name}] Tahlilda xatolik: {e}")
 
 def monitor_loop():
-    """Doimiy fonda ishlovchi signal qidirish sikli"""
-    time.sleep(2)
+    time.sleep(3)
     cur_price = get_current_price()
     price_str = f"{cur_price:.2f}" if cur_price else "Aniqlanmadi"
 
     start_msg = (
-        f"🤖 <b>Web Servis muvaffaqiyatli ishga tushdi!</b>\n"
+        f"🤖 <b>Web Servis ishga tushdi! (Finnhub API)</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Aktiv:</b> {SYMBOL}\n"
+        f"📊 <b>Aktiv:</b> XAU/USD (GOLD)\n"
         f"💵 <b>Hozirgi narx:</b> <code>{price_str}</code>\n"
         f"⏱ <b>Kuzatilmoqda:</b> M5, M15, M30\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Tizim signal kelishi bilan darhol xabar beradi."
+        f"✅ Tizim faol. Shart bajarilishi bilan darhol signal yuboriladi."
     )
     send_telegram(start_msg)
 
     while True:
-        for tf_name, tf_interval in TIMEFRAMES.items():
-            check_timeframe(tf_name, tf_interval)
-            time.sleep(1.2)  # API limitlaridan himoya
-        time.sleep(10)
+        for tf_name, tf_res in TIMEFRAMES.items():
+            check_timeframe(tf_name, tf_res)
+            time.sleep(1)
+        time.sleep(5)
 
-# Monitoringni alohida oqimda ishga tushiramiz
+# Monitoringni alohida tahrir oqimida fonda yurgizish
 threading.Thread(target=monitor_loop, daemon=True).start()
 
 if __name__ == "__main__":
