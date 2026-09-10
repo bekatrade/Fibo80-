@@ -2,154 +2,165 @@ import os
 import time
 import threading
 import requests
-from flask import Flask
 from datetime import datetime
 
-# ==================== SOZLAMALAR ====================
+# --- SOZLAMALAR ---
 BOT_TOKEN = "8599420009:AAG3mwpv8COm1BL0RjguYPScBHjLY-hMYKA"
 CHAT_ID = "8426582765"
-SYMBOL = "PAXGUSDT"  # Real Oltin (1 PAXG = 1 XAU Oltin)
+API_KEY = "9ffe2e86b6bd4d35ba2800101c9cfdb9"
+SYMBOL = "XAU/USD"
+TIMEFRAMES = ["5min", "15min"]  # Faqat M5 va M15
 
-# Binance timeframelari
-TIMEFRAMES = {
-    "M5": "5m",
-    "M15": "15m",
-    "M30": "30m"
+# Oxirgi ko'rilgan sham vaqtini saqlash (qayta signal yubormaslik uchun)
+last_processed_candle = {
+    "5min": None,
+    "15min": None
 }
 
-last_processed = {
-    "M5": None,
-    "M15": None,
-    "M30": None
-}
-
-# ==================== FLASK SERVER (Render Web Service) ====================
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "XAU/USD Oltin Signal Boti 24/7 aktiv!", 200
-
-# ==================== TELEGRAM VA BOZOR FUNKSIYALARI ====================
-def send_telegram(text):
+def send_telegram(text, reply_markup=None):
+    """Telegramga xabar yuborish funksiyasi"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "Markdown"
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=8)
     except Exception as e:
-        print(f"[Telegram Xatosi]: {e}")
+        print(f"Telegram yuborishda xatolik: {e}")
 
-def get_current_price():
-    """Joriy Oltin narxini Binance'dan olish (Token talab qilmaydi)"""
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}"
+def send_telegram_alert(tf, direction, p_high, p_low, c_high, c_low, c_close):
+    """Strategiya signali chiqqanda xabar berish"""
+    icon = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
+    tf_display = "M5" if tf == "5min" else "M15"
+    msg = (
+        f"⚡️ {icon} SIGNAL | GOLD (XAUUSD)\n"
+        f"⏱ Timeframe: {tf_display}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 1-sham: High={p_high:.2f} | Low={p_low:.2f}\n"
+        f"📌 2-sham: High={c_high:.2f} | Low={c_low:.2f}\n"
+        f"🎯 Yopilish narxi: {c_close:.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Ikkala tomondan likvidlik olinib, tana bilan buzib yopildi!"
+    )
+    send_telegram(msg)
+
+def get_current_price_info():
+    """Twelve Data orqali hozirgi narx va detallarni olish"""
     try:
-        res = requests.get(url, timeout=5).json()
-        if "price" in res:
-            return float(res["price"])
+        url = f"https://api.twelvedata.com/quote?symbol={SYMBOL}&apikey={API_KEY}"
+        res = requests.get(url, timeout=8).json()
+
+        if "close" not in res:
+            return None
+
+        price = round(float(res["close"]), 2)
+        high = round(float(res.get("high", price)), 2)
+        low = round(float(res.get("low", price)), 2)
+        change = round(float(res.get("change", 0)), 2)
+        pct_change = round(float(res.get("percent_change", 0)), 2)
+        sign = "+" if change >= 0 else ""
+
+        now_str = datetime.now().strftime("%H:%M:%S")
+
+        msg = (
+            f"📊 *Aktiv: XAU/USD (GOLD)*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💵 *Hozirgi narx:* `${price}`\n"
+            f"📈 *High:* `${high}`\n"
+            f"📉 *Low:* `${low}`\n"
+            f"📊 *O'zgarish:* `{sign}{change} ({sign}{pct_change}%)`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⏱ *Vaqt:* `{now_str}`\n"
+            f"✅ Manba: Twelve Data"
+        )
+        return msg
     except Exception as e:
-        print(f"[Narx xatosi]: {e}")
-    return None
+        print(f"Narx olishda xatolik: {e}")
+        return None
 
-def check_timeframe(tf_name, tf_interval):
-    """M5, M15, M30 shamlarni tekshirish"""
-    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={tf_interval}&limit=4"
+def check_candles(tf):
+    """M5 va M15 shamlarini tahlil qilish"""
+    url = f"https://api.twelvedata.com/time_series?symbol={SYMBOL}&interval={tf}&outputsize=3&apikey={API_KEY}"
     try:
-        res = requests.get(url, timeout=5).json()
-        if not isinstance(res, list) or len(res) < 3:
+        res = requests.get(url, timeout=8).json()
+        if "values" not in res or len(res["values"]) < 3:
             return
 
-        # Binance shamlari tuzilishi:
-        # [0: Open_time, 1: Open, 2: High, 3: Low, 4: Close, ...]
-        # res[-1] -> ayni damda shakllanayotgan (ochiq) sham
-        # res[-2] -> yangi yopilgan 2-sham
-        # res[-3] -> 1-sham (oldingi sham)
+        bars = res["values"]  # 0: shakllanmoqda, 1: yangi yopilgan 2-sham, 2: birinchi sham
+        c_bar = bars[1]
+        p_bar = bars[2]
 
-        p_bar = res[-3]
-        c_bar = res[-2]
-
-        c_time = c_bar[0]
-
-        # Agar bu sham avval tekshirilgan bo'lsa, o'tkazib yuboramiz
-        if last_processed[tf_name] == c_time:
+        curr_time = c_bar["datetime"]
+        if last_processed_candle[tf] == curr_time:
             return
 
-        h1, l1 = float(p_bar[2]), float(p_bar[3])
-        h2, l2 = float(c_bar[2]), float(c_bar[3])
-        c2 = float(c_bar[4])
+        p_high, p_low = float(p_bar["high"]), float(p_bar["low"])
+        c_high, c_low = float(c_bar["high"]), float(c_bar["low"])
+        c_close = float(c_bar["close"])
 
-        # Shart 1: 2-sham 1-shamning yuqorisini ham, pastini ham yangilagan (Sweep)
-        swept_both = (h2 > h1) and (l2 < l1)
+        # Likvidlik olinganligini tekshirish (Sweep)
+        swept_both = (c_high > p_high) and (c_low < p_low)
 
         if swept_both:
-            time_str = datetime.fromtimestamp(c_time / 1000).strftime('%H:%M')
+            if c_close < p_low:
+                send_telegram_alert(tf, "SELL", p_high, p_low, c_high, c_low, c_close)
+                last_processed_candle[tf] = curr_time
+            elif c_close > p_high:
+                send_telegram_alert(tf, "BUY", p_high, p_low, c_high, c_low, c_close)
+                last_processed_candle[tf] = curr_time
 
-            # Shart 2: Pastga tana bilan yopilsa (SELL)
-            if c2 < l1:
-                msg = (
-                    f"🔴 <b>SELL SIGNAL | XAU/USD (GOLD)</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⏱ <b>Timeframe:</b> {tf_name}\n"
-                    f"🕒 <b>Sham yopilgan vaqt:</b> {time_str}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"📌 <b>1-sham:</b> High: <code>{h1:.2f}</code> | Low: <code>{l1:.2f}</code>\n"
-                    f"📌 <b>2-sham:</b> High: <code>{h2:.2f}</code> | Low: <code>{l2:.2f}</code>\n"
-                    f"🎯 <b>Close:</b> <code>{c2:.2f}</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⚡️ <i>Ikkala tomondan likvidlik olindi va pastga tana bilan yopildi!</i>"
-                )
-                send_telegram(msg)
-                last_processed[tf_name] = c_time
-                print(f"[{tf_name}] SELL signali jo'natildi!")
+    except Exception as ex:
+        print(f"[{tf}] Xatolik: {ex}")
 
-            # Shart 3: Tepaga tana bilan yopilsa (BUY)
-            elif c2 > h1:
-                msg = (
-                    f"🟢 <b>BUY SIGNAL | XAU/USD (GOLD)</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⏱ <b>Timeframe:</b> {tf_name}\n"
-                    f"🕒 <b>Sham yopilgan vaqt:</b> {time_str}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"📌 <b>1-sham:</b> High: <code>{h1:.2f}</code> | Low: <code>{l1:.2f}</code>\n"
-                    f"📌 <b>2-sham:</b> High: <code>{h2:.2f}</code> | Low: <code>{l2:.2f}</code>\n"
-                    f"🎯 <b>Close:</b> <code>{c2:.2f}</code>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⚡️ <i>Ikkala tomondan likvidlik olindi va tepaga tana bilan yopildi!</i>"
-                )
-                send_telegram(msg)
-                last_processed[tf_name] = c_time
-                print(f"[{tf_name}] BUY signali jo'natildi!")
-
-    except Exception as e:
-        print(f"[{tf_name}] Xatolik: {e}")
-
-def monitor_loop():
-    time.sleep(2)
-    cur_price = get_current_price()
-    price_str = f"{cur_price:.2f}" if cur_price else "Aniqlanmadi"
-
-    start_msg = (
-        f"🤖 <b>Web Servis muvaffaqiyatli ishga tushdi!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Aktiv:</b> XAU/USD (GOLD)\n"
-        f"💵 <b>Hozirgi narx:</b> <code>{price_str}</code>\n"
-        f"⏱ <b>Kuzatilmoqda:</b> M5, M15, M30\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Tizim 100% aktiv. Hech qanday limit yo'q!"
-    )
-    send_telegram(start_msg)
+def listen_telegram_button():
+    """'💵 Narx' tugmasini eshitib turish (alohida oqimda)"""
+    offset = None
+    keyboard = {
+        "keyboard": [[{"text": "💵 Narx"}]],
+        "resize_keyboard": True
+    }
+    send_telegram("🤖 Tizim ishga tushdi! XAU/USD narxini ko'rish uchun tugmani bosing:", keyboard)
 
     while True:
-        for tf_name, tf_interval in TIMEFRAMES.items():
-            check_timeframe(tf_name, tf_interval)
-            time.sleep(0.5)
-        time.sleep(3)  # Har 3 soniyada tekshiradi (Binance bunga bemalol ruxsat beradi)
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+            params = {"timeout": 20}
+            if offset:
+                params["offset"] = offset
 
-threading.Thread(target=monitor_loop, daemon=True).start()
+            res = requests.get(url, params=params, timeout=25).json()
+            if "result" in res:
+                for update in res["result"]:
+                    offset = update["update_id"] + 1
+                    msg = update.get("message", {})
+                    text = msg.get("text", "")
+
+                    if text in ["💵 Narx", "/narx", "/price"]:
+                        info = get_current_price_info()
+                        if info:
+                            send_telegram(info, keyboard)
+                        else:
+                            send_telegram("⚠️ Narxni olib bo'lmadi, qaytadan urinib ko'ring.", keyboard)
+        except Exception:
+            time.sleep(2)
+
+def main():
+    print("🚀 XAU/USD signallari va monitoring boti ishga tushdi...")
+    
+    # Tugmalarni tinglovchi fon jarayonini ishga tushiramiz
+    threading.Thread(target=listen_telegram_button, daemon=True).start()
+
+    while True:
+        for tf in TIMEFRAMES:
+            check_candles(tf)
+            time.sleep(2)  # Ikki so'rov orasida 2 soniya tanaffus (daqiqalik limit buzilmaydi)
+
+        # 5 daqiqa (300 soniya) kutish
+        time.sleep(300)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    main()
