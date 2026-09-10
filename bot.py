@@ -8,13 +8,13 @@ from datetime import datetime
 # ==================== SOZLAMALAR ====================
 BOT_TOKEN = "8599420009:AAG3mwpv8COm1BL0RjguYPScBHjLY-hMYKA"
 CHAT_ID = "8426582765"
-API_KEY = "dah628pr01qomffmt32gdah628pr01qomffmt330"
-SYMBOL = "OANDA:XAU_USD"
+SYMBOL = "PAXGUSDT"  # Real Oltin (1 PAXG = 1 XAU Oltin)
 
+# Binance timeframelari
 TIMEFRAMES = {
-    "M5": "5",
-    "M15": "15",
-    "M30": "30"
+    "M5": "5m",
+    "M15": "15m",
+    "M30": "30m"
 }
 
 last_processed = {
@@ -23,12 +23,12 @@ last_processed = {
     "M30": None
 }
 
-# ==================== FLASK SERVER (Render uchun) ====================
+# ==================== FLASK SERVER (Render Web Service) ====================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "XAU/USD Finnhub Signal Bot ishlamoqda!", 200
+    return "XAU/USD Oltin Signal Boti 24/7 aktiv!", 200
 
 # ==================== TELEGRAM VA BOZOR FUNKSIYALARI ====================
 def send_telegram(text):
@@ -41,49 +41,56 @@ def send_telegram(text):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"[Xatolik] Telegramga yuborib bo'lmadi: {e}")
+        print(f"[Telegram Xatosi]: {e}")
 
 def get_current_price():
-    url = f"https://finnhub.io/api/v1/quote?symbol={SYMBOL}&token={API_KEY}"
+    """Joriy Oltin narxini Binance'dan olish (Token talab qilmaydi)"""
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}"
     try:
-        res = requests.get(url, timeout=10).json()
-        if "c" in res and res["c"] != 0:
-            return float(res["c"])
+        res = requests.get(url, timeout=5).json()
+        if "price" in res:
+            return float(res["price"])
     except Exception as e:
-        print(f"[Xatolik] Narx olinmadi: {e}")
+        print(f"[Narx xatosi]: {e}")
     return None
 
-def check_timeframe(tf_name, tf_resolution):
-    now_ts = int(time.time())
-    from_ts = now_ts - (86400 * 2)
-
-    url = f"https://finnhub.io/api/v1/forex/candle?symbol={SYMBOL}&resolution={tf_resolution}&from={from_ts}&to={now_ts}&token={API_KEY}"
+def check_timeframe(tf_name, tf_interval):
+    """M5, M15, M30 shamlarni tekshirish"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={tf_interval}&limit=4"
     try:
-        res = requests.get(url, timeout=10).json()
-        if res.get("s") != "ok" or len(res.get("t", [])) < 3:
+        res = requests.get(url, timeout=5).json()
+        if not isinstance(res, list) or len(res) < 3:
             return
 
-        # -1: Hozir ochiq turgan sham
-        # -2: Yangi yopilgan 2-sham
-        # -3: Undan oldingi 1-sham
-        c_time = res["t"][-2]
+        # Binance shamlari tuzilishi:
+        # [0: Open_time, 1: Open, 2: High, 3: Low, 4: Close, ...]
+        # res[-1] -> ayni damda shakllanayotgan (ochiq) sham
+        # res[-2] -> yangi yopilgan 2-sham
+        # res[-3] -> 1-sham (oldingi sham)
+
+        p_bar = res[-3]
+        c_bar = res[-2]
+
+        c_time = c_bar[0]
+
+        # Agar bu sham avval tekshirilgan bo'lsa, o'tkazib yuboramiz
         if last_processed[tf_name] == c_time:
             return
 
-        h1, l1 = float(res["h"][-3]), float(res["l"][-3])
-        h2, l2 = float(res["h"][-2]), float(res["l"][-2])
-        c2 = float(res["c"][-2])
+        h1, l1 = float(p_bar[2]), float(p_bar[3])
+        h2, l2 = float(c_bar[2]), float(c_bar[3])
+        c2 = float(c_bar[4])
 
         # Shart 1: 2-sham 1-shamning yuqorisini ham, pastini ham yangilagan (Sweep)
         swept_both = (h2 > h1) and (l2 < l1)
 
         if swept_both:
-            time_str = datetime.fromtimestamp(c_time).strftime('%H:%M')
+            time_str = datetime.fromtimestamp(c_time / 1000).strftime('%H:%M')
 
             # Shart 2: Pastga tana bilan yopilsa (SELL)
             if c2 < l1:
                 msg = (
-                    f"🔴 <b>SELL SIGNAL | XAU/USD</b>\n"
+                    f"🔴 <b>SELL SIGNAL | XAU/USD (GOLD)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"⏱ <b>Timeframe:</b> {tf_name}\n"
                     f"🕒 <b>Sham yopilgan vaqt:</b> {time_str}\n"
@@ -101,7 +108,7 @@ def check_timeframe(tf_name, tf_resolution):
             # Shart 3: Tepaga tana bilan yopilsa (BUY)
             elif c2 > h1:
                 msg = (
-                    f"🟢 <b>BUY SIGNAL | XAU/USD</b>\n"
+                    f"🟢 <b>BUY SIGNAL | XAU/USD (GOLD)</b>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"⏱ <b>Timeframe:</b> {tf_name}\n"
                     f"🕒 <b>Sham yopilgan vaqt:</b> {time_str}\n"
@@ -117,31 +124,30 @@ def check_timeframe(tf_name, tf_resolution):
                 print(f"[{tf_name}] BUY signali jo'natildi!")
 
     except Exception as e:
-        print(f"[{tf_name}] Tahlilda xatolik: {e}")
+        print(f"[{tf_name}] Xatolik: {e}")
 
 def monitor_loop():
-    time.sleep(3)
+    time.sleep(2)
     cur_price = get_current_price()
     price_str = f"{cur_price:.2f}" if cur_price else "Aniqlanmadi"
 
     start_msg = (
-        f"🤖 <b>Web Servis ishga tushdi! (Finnhub API)</b>\n"
+        f"🤖 <b>Web Servis muvaffaqiyatli ishga tushdi!</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Aktiv:</b> XAU/USD (GOLD)\n"
         f"💵 <b>Hozirgi narx:</b> <code>{price_str}</code>\n"
         f"⏱ <b>Kuzatilmoqda:</b> M5, M15, M30\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Tizim faol. Shart bajarilishi bilan darhol signal yuboriladi."
+        f"✅ Tizim 100% aktiv. Hech qanday limit yo'q!"
     )
     send_telegram(start_msg)
 
     while True:
-        for tf_name, tf_res in TIMEFRAMES.items():
-            check_timeframe(tf_name, tf_res)
-            time.sleep(1)
-        time.sleep(5)
+        for tf_name, tf_interval in TIMEFRAMES.items():
+            check_timeframe(tf_name, tf_interval)
+            time.sleep(0.5)
+        time.sleep(3)  # Har 3 soniyada tekshiradi (Binance bunga bemalol ruxsat beradi)
 
-# Monitoringni alohida tahrir oqimida fonda yurgizish
 threading.Thread(target=monitor_loop, daemon=True).start()
 
 if __name__ == "__main__":
