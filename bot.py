@@ -3,22 +3,35 @@ import time
 import threading
 import requests
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- SOZLAMALAR ---
 BOT_TOKEN = "8599420009:AAG3mwpv8COm1BL0RjguYPScBHjLY-hMYKA"
 CHAT_ID = "8426582765"
 API_KEY = "9ffe2e86b6bd4d35ba2800101c9cfdb9"
 SYMBOL = "XAU/USD"
-TIMEFRAMES = ["5min", "15min"]  # Faqat M5 va M15
+TIMEFRAMES = ["5min", "15min"]
 
-# Oxirgi ko'rilgan sham vaqtini saqlash (qayta signal yubormaslik uchun)
 last_processed_candle = {
     "5min": None,
     "15min": None
 }
 
+# --- RENDER PORT XATOSINI YO'QOTUVCHI KICHIK SERVER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
+
+def run_fake_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# ----------------------------------------------------
+
 def send_telegram(text, reply_markup=None):
-    """Telegramga xabar yuborish funksiyasi"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -33,7 +46,6 @@ def send_telegram(text, reply_markup=None):
         print(f"Telegram yuborishda xatolik: {e}")
 
 def send_telegram_alert(tf, direction, p_high, p_low, c_high, c_low, c_close):
-    """Strategiya signali chiqqanda xabar berish"""
     icon = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
     tf_display = "M5" if tf == "5min" else "M15"
     msg = (
@@ -49,7 +61,6 @@ def send_telegram_alert(tf, direction, p_high, p_low, c_high, c_low, c_close):
     send_telegram(msg)
 
 def get_current_price_info():
-    """Twelve Data orqali hozirgi narx va detallarni olish"""
     try:
         url = f"https://api.twelvedata.com/quote?symbol={SYMBOL}&apikey={API_KEY}"
         res = requests.get(url, timeout=8).json()
@@ -63,7 +74,6 @@ def get_current_price_info():
         change = round(float(res.get("change", 0)), 2)
         pct_change = round(float(res.get("percent_change", 0)), 2)
         sign = "+" if change >= 0 else ""
-
         now_str = datetime.now().strftime("%H:%M:%S")
 
         msg = (
@@ -83,14 +93,13 @@ def get_current_price_info():
         return None
 
 def check_candles(tf):
-    """M5 va M15 shamlarini tahlil qilish"""
     url = f"https://api.twelvedata.com/time_series?symbol={SYMBOL}&interval={tf}&outputsize=3&apikey={API_KEY}"
     try:
         res = requests.get(url, timeout=8).json()
         if "values" not in res or len(res["values"]) < 3:
             return
 
-        bars = res["values"]  # 0: shakllanmoqda, 1: yangi yopilgan 2-sham, 2: birinchi sham
+        bars = res["values"]
         c_bar = bars[1]
         p_bar = bars[2]
 
@@ -102,7 +111,6 @@ def check_candles(tf):
         c_high, c_low = float(c_bar["high"]), float(c_bar["low"])
         c_close = float(c_bar["close"])
 
-        # Likvidlik olinganligini tekshirish (Sweep)
         swept_both = (c_high > p_high) and (c_low < p_low)
 
         if swept_both:
@@ -117,7 +125,6 @@ def check_candles(tf):
         print(f"[{tf}] Xatolik: {ex}")
 
 def listen_telegram_button():
-    """'💵 Narx' tugmasini eshitib turish (alohida oqimda)"""
     offset = None
     keyboard = {
         "keyboard": [[{"text": "💵 Narx"}]],
@@ -151,15 +158,18 @@ def listen_telegram_button():
 def main():
     print("🚀 XAU/USD signallari va monitoring boti ishga tushdi...")
     
-    # Tugmalarni tinglovchi fon jarayonini ishga tushiramiz
+    # 1. Render talab qilgan portni orqa fonda ochamiz (xato bermasligi uchun)
+    threading.Thread(target=run_fake_server, daemon=True).start()
+
+    # 2. Tugmalarni eshitish foni
     threading.Thread(target=listen_telegram_button, daemon=True).start()
 
+    # 3. Bozor shamlari tahlili sikli
     while True:
         for tf in TIMEFRAMES:
             check_candles(tf)
-            time.sleep(2)  # Ikki so'rov orasida 2 soniya tanaffus (daqiqalik limit buzilmaydi)
+            time.sleep(2)
 
-        # 5 daqiqa (300 soniya) kutish
         time.sleep(300)
 
 if __name__ == "__main__":
